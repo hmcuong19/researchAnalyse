@@ -16,7 +16,7 @@ if not api_key:
 # Textbox cho phép chỉnh sửa prompt mặc định
 default_prompt = """
 Từ link bài báo sau: {url}
-Truy cập vào link, đọc thông tin tiêu đề và abstract của bài báo, từ đó phân loại nếu bài báo liên quan tới AI (học máy, học sâu, trí tuệ nhân tạo, v.v.).
+Tìm hiểu thông tin từ tiêu đề và abstract, phân loại nếu bài báo liên quan tới AI (học máy, học sâu, trí tuệ nhân tạo, v.v.).
 Nếu liên quan, trả về dạng markdown theo cấu trúc: 
 | Tên đề tài | Năm | Tên tạp chí | Phân loại rank tạp chí Q1, Q2, Q3, Q4 |
 Nếu không liên quan hoặc không có rank, bỏ qua (không trả về gì).
@@ -51,6 +51,7 @@ if uploaded_file:
         # Nút Start để bắt đầu phân tích
         if st.button("Start"):
             results = []
+            error_links = []
             progress_bar = st.progress(0)
             status_text = st.empty()
 
@@ -92,6 +93,7 @@ if uploaded_file:
                                         "Phân loại rank tạp chí": data[3].strip()
                                     })
                     else:
+                        error_links.append((url, f"API error: {response.status_code}"))
                         st.warning(f"Lỗi gọi API cho link {url}: {response.status_code}")
 
                     # Cập nhật tiến trình
@@ -101,6 +103,7 @@ if uploaded_file:
                     time.sleep(0.5)  # Tránh vượt quá giới hạn rate limit
 
                 except Exception as e:
+                    error_links.append((url, str(e)))
                     st.warning(f"Lỗi xử lý link {url}: {str(e)}")
 
             if results:
@@ -122,6 +125,11 @@ if uploaded_file:
                 )
             else:
                 st.info("Không tìm thấy bài báo nào liên quan đến AI có rank tạp chí.")
+
+            if error_links:
+                st.write("Danh sách link lỗi:")
+                error_df = pd.DataFrame(error_links, columns=["Link", "Lỗi"])
+                st.dataframe(error_df)
 
     except Exception as e:
         st.error(f"Lỗi đọc file Excel: {str(e)}")
