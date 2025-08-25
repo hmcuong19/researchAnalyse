@@ -3,6 +3,8 @@ import pandas as pd
 import requests
 from io import BytesIO
 import time
+from bs4 import BeautifulSoup
+import re
 
 # Tiêu đề ứng dụng
 st.title("Phân loại Bài Báo Liên Quan Đến AI Từ File Excel")
@@ -13,11 +15,44 @@ if not api_key:
     st.error("Vui lòng cấu hình GROQ_API_KEY trong .streamlit/secrets.toml")
     st.stop()
 
+# Hàm cào tiêu đề và abstract từ link
+def scrape_article_info(url):
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Tìm tiêu đề (thường trong thẻ <title> hoặc <h1>)
+            title_tag = soup.find('title') or soup.find('h1')
+            title = title_tag.text.strip() if title_tag else "Unknown Title"
+            
+            # Tìm abstract (thường trong thẻ meta hoặc div với class cụ thể)
+            abstract = "No abstract found"
+            meta_abstract = soup.find('meta', attrs={'name': re.compile('description|abstract', re.I)})
+            if meta_abstract and meta_abstract.get('content'):
+                abstract = meta_abstract.get('content').strip()
+            else:
+                # Tìm trong div hoặc p có chứa từ khóa "abstract"
+                for tag in soup.find_all(['div', 'p']):
+                    if 'abstract' in tag.text.lower():
+                        abstract = tag.text.strip()
+                        break
+            
+            return title, abstract
+        else:
+            return None, None
+    except Exception as e:
+        return None, None
+
 # Textbox cho phép chỉnh sửa prompt mặc định
 default_prompt = """
-Từ link bài báo sau: {url}
-Tìm hiểu thông tin từ tiêu đề và abstract, phân loại nếu bài báo liên quan tới AI (học máy, học sâu, trí tuệ nhân tạo, v.v.).
-Nếu liên quan, trả về dạng markdown theo cấu trúc: 
+Dựa trên thông tin sau:
+Tiêu đề: {title}
+Abstract: {abstract}
+Phân loại nếu bài báo liên quan tới AI (học máy, học sâu, trí tuệ nhân tạo, v.v.). Nếu liên quan, trả về dạng markdown theo cấu trúc:
 | Tên đề tài | Năm | Tên tạp chí | Phân loại rank tạp chí Q1, Q2, Q3, Q4 |
 Nếu không liên quan hoặc không có rank, bỏ qua (không trả về gì).
 Chỉ trả về bảng markdown, không thêm text khác.
@@ -60,8 +95,14 @@ if uploaded_file:
 
             for i, url in enumerate(links_to_process):
                 try:
-                    # Tạo prompt với URL
-                    prompt_with_url = prompt.format(url=url)
+                    # Cào tiêu đề và abstract
+                    title, abstract = scrape_article_info(url)
+                    if not title or not abstract:
+                        error_links.append((url, "Không thể cào được tiêu đề hoặc abstract"))
+                        continue
+
+                    # Tạo prompt với tiêu đề và abstract
+                    prompt_with_data = prompt.format(title=title, abstract=abstract)
                     
                     # Gọi Groq API
                     response = requests.post(
@@ -72,7 +113,7 @@ if uploaded_file:
                         },
                         json={
                             "model": "llama-3.1-70b-versatile",
-                            "messages": [{"role": "user", "content": prompt_with_url}],
+                            "messages": [{"role": "user", "content": prompt_with_data}],
                             "temperature": 0.5,
                             "max_tokens": 512
                         }
@@ -80,7 +121,7 @@ if uploaded_file:
                     
                     if response.status_code == 200:
                         content = response.json()['choices'][0]['message']['content']
-                        # Kiểm tra nếu content là bảng markdown hợp lệ và liên quan đến AI
+                        # Kiểm tra nếu content là bảng markdown hợp lệ
                         if content.strip().startswith('|') and '|' in content:
                             lines = content.strip().split('\n')
                             if len(lines) >= 3:  # Header, separator, data
@@ -94,7 +135,6 @@ if uploaded_file:
                                     })
                     else:
                         error_links.append((url, f"API error: {response.status_code}"))
-                        st.warning(f"Lỗi gọi API cho link {url}: {response.status_code}")
 
                     # Cập nhật tiến trình
                     progress = (i + 1) / len(links_to_process)
@@ -104,7 +144,6 @@ if uploaded_file:
 
                 except Exception as e:
                     error_links.append((url, str(e)))
-                    st.warning(f"Lỗi xử lý link {url}: {str(e)}")
 
             if results:
                 # Hiển thị kết quả
