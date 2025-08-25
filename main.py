@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import pandas as pd
 import requests
@@ -16,7 +17,7 @@ if not api_key:
 # Textbox cho phép chỉnh sửa prompt mặc định
 default_prompt = """
 Từ link bài báo sau: {url}
-Tìm hiểu thông tin từ tiêu đề và abstract, phân loại nếu bài báo liên quan tới AI (học máy, học sâu, trí tuệ nhân tạo, v.v.).
+Truy cập vào link, đọc thông tin tiêu đề và abstract của bài báo, từ đó phân loại nếu bài báo liên quan tới AI (học máy, học sâu, trí tuệ nhân tạo, v.v.).
 Nếu liên quan, trả về dạng markdown theo cấu trúc: 
 | Tên đề tài | Năm | Tên tạp chí | Phân loại rank tạp chí Q1, Q2, Q3, Q4 |
 Nếu không liên quan hoặc không có rank, bỏ qua (không trả về gì).
@@ -38,77 +39,94 @@ if uploaded_file:
         
         st.write(f"Tìm thấy {len(links)} link hợp lệ.")
 
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        # Ô nhập số lượng link muốn xử lý
+        max_links = len(links)
+        num_links = st.number_input(
+            "Số lượng link muốn xử lý (tối đa {}):".format(max_links),
+            min_value=1,
+            max_value=max_links,
+            value=max_links,
+            step=1
+        )
 
-        for i, url in enumerate(links):
-            try:
-                # Tạo prompt với URL
-                prompt_with_url = prompt.format(url=url)
-                
-                # Gọi Groq API
-                response = requests.post(
-                    "https://api.groq.com/v1/chat/completions",  # Endpoint chính thức của Groq
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "llama-3.1-70b-versatile",  # Sử dụng model phù hợp
-                        "messages": [{"role": "user", "content": prompt_with_url}],
-                        "temperature": 0.5,
-                        "max_tokens": 512
-                    }
+        # Nút Start để bắt đầu phân tích
+        if st.button("Start"):
+            results = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            # Giới hạn số lượng link theo input
+            links_to_process = links[:min(num_links, max_links)]
+
+            for i, url in enumerate(links_to_process):
+                try:
+                    # Tạo prompt với URL
+                    prompt_with_url = prompt.format(url=url)
+                    
+                    # Gọi Groq API
+                    response = requests.post(
+                        "https://api.groq.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": "llama-3.1-70b-versatile",
+                            "messages": [{"role": "user", "content": prompt_with_url}],
+                            "temperature": 0.5,
+                            "max_tokens": 512
+                        }
+                    )
+                    
+                    if response.status_code == 200:
+                        content = response.json()['choices'][0]['message']['content']
+                        # Kiểm tra nếu content là bảng markdown hợp lệ và liên quan đến AI
+                        if content.strip().startswith('|') and '|' in content:
+                            lines = content.strip().split('\n')
+                            if len(lines) >= 3:  # Header, separator, data
+                                data = lines[2].strip('| ').split(' | ')
+                                if len(data) == 4:
+                                    results.append({
+                                        "Tên đề tài": data[0].strip(),
+                                        "Năm": data[1].strip(),
+                                        "Tên tạp chí": data[2].strip(),
+                                        "Phân loại rank tạp chí": data[3].strip()
+                                    })
+                    else:
+                        st.warning(f"Lỗi gọi API cho link {url}: {response.status_code}")
+
+                    # Cập nhật tiến trình
+                    progress = (i + 1) / len(links_to_process)
+                    progress_bar.progress(progress)
+                    status_text.text(f"Đang xử lý {i+1}/{len(links_to_process)} links...")
+                    time.sleep(0.5)  # Tránh vượt quá giới hạn rate limit
+
+                except Exception as e:
+                    st.warning(f"Lỗi xử lý link {url}: {str(e)}")
+
+            if results:
+                # Hiển thị kết quả
+                result_df = pd.DataFrame(results)
+                st.write("Kết quả:")
+                st.dataframe(result_df)
+
+                # Chuẩn bị file CSV để download
+                output = BytesIO()
+                result_df.to_csv(output, index=False, encoding='utf-8-sig')
+                output.seek(0)
+
+                st.download_button(
+                    label="Download CSV",
+                    data=output,
+                    file_name="ket_qua_phan_loai_AI.csv",
+                    mime="text/csv"
                 )
-                
-                if response.status_code == 200:
-                    content = response.json()['choices'][0]['message']['content']
-                    # Kiểm tra nếu content là bảng markdown hợp lệ và liên quan đến AI
-                    if content.strip().startswith('|') and '|' in content:
-                        lines = content.strip().split('\n')
-                        if len(lines) >= 3:  # Header, separator, data
-                            data = lines[2].strip('| ').split(' | ')
-                            if len(data) == 4:
-                                results.append({
-                                    "Tên đề tài": data[0].strip(),
-                                    "Năm": data[1].strip(),
-                                    "Tên tạp chí": data[2].strip(),
-                                    "Phân loại rank tạp chí": data[3].strip()
-                                })
-                else:
-                    st.warning(f"Lỗi gọi API cho link {url}: {response.status_code}")
-
-                # Cập nhật tiến trình
-                progress = (i + 1) / len(links)
-                progress_bar.progress(progress)
-                status_text.text(f"Đang xử lý {i+1}/{len(links)} links...")
-                time.sleep(0.5)  # Tránh vượt quá giới hạn rate limit
-
-            except Exception as e:
-                st.warning(f"Lỗi xử lý link {url}: {str(e)}")
-
-        if results:
-            # Hiển thị kết quả
-            result_df = pd.DataFrame(results)
-            st.write("Kết quả:")
-            st.dataframe(result_df)
-
-            # Chuẩn bị file CSV để download
-            output = BytesIO()
-            result_df.to_csv(output, index=False, encoding='utf-8-sig')
-            output.seek(0)
-
-            st.download_button(
-                label="Download CSV",
-                data=output,
-                file_name="ket_qua_phan_loai_AI.csv",
-                mime="text/csv"
-            )
-        else:
-            st.info("Không tìm thấy bài báo nào liên quan đến AI có rank tạp chí.")
+            else:
+                st.info("Không tìm thấy bài báo nào liên quan đến AI có rank tạp chí.")
 
     except Exception as e:
         st.error(f"Lỗi đọc file Excel: {str(e)}")
 else:
     st.info("Vui lòng upload file Excel để bắt đầu.")
+
+```
