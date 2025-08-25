@@ -3,15 +3,48 @@ import pandas as pd
 import requests
 from io import BytesIO
 import time
+from bs4 import BeautifulSoup
+import re
 
 # Tiêu đề ứng dụng
 st.title("Phân loại Bài Báo Liên Quan Đến AI Từ File Excel")
 
 # Lấy API key từ Streamlit secrets
-api_key = st.secrets.get("GROQ_API_KEY", None)
+api_key = st.secrets.get("GEMINI_API_KEY", None)
 if not api_key:
-    st.error("Vui lòng cấu hình GROQ_API_KEY trong .streamlit/secrets.toml")
+    st.error("Vui lòng cấu hình GEMINI_API_KEY trong .streamlit/secrets.toml")
     st.stop()
+
+# Hàm cào tiêu đề và abstract từ link
+def scrape_article_info(url):
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Tìm tiêu đề (thường trong thẻ <title> hoặc <h1>)
+            title_tag = soup.find('title') or soup.find('h1')
+            title = title_tag.text.strip() if title_tag else "Unknown Title"
+            
+            # Tìm abstract (thường trong thẻ meta hoặc div với class cụ thể)
+            abstract = "No abstract found"
+            meta_abstract = soup.find('meta', attrs={'name': re.compile('description|abstract', re.I)})
+            if meta_abstract and meta_abstract.get('content'):
+                abstract = meta_abstract.get('content').strip()
+            else:
+                for tag in soup.find_all(['div', 'p']):
+                    if 'abstract' in tag.text.lower():
+                        abstract = tag.text.strip()
+                        break
+            
+            return title, abstract
+        else:
+            return None, None
+    except Exception as e:
+        return None, None
 
 # Textbox cho phép chỉnh sửa prompt mặc định
 default_prompt = """
@@ -51,6 +84,7 @@ if uploaded_file:
         # Nút Start để bắt đầu phân tích
         if st.button("Start"):
             results = []
+            error_links = []
             progress_bar = st.progress(0)
             status_text = st.empty()
 
@@ -59,27 +93,37 @@ if uploaded_file:
 
             for i, url in enumerate(links_to_process):
                 try:
-                    # Tạo prompt với URL
-                    prompt_with_url = prompt.format(url=url)
+                    # Cào tiêu đề và abstract
+                    title, abstract = scrape_article_info(url)
+                    if not title or not abstract:
+                        error_links.append((url, "Không thể cào được tiêu đề hoặc abstract"))
+                        continue
+
+                    # Tạo prompt với tiêu đề và abstract
+                    prompt_with_data = prompt.format(title=title, abstract=abstract)
                     
-                    # Gọi Groq API
+                    # Gọi Gemini API
                     response = requests.post(
-                        "https://api.groq.com/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json"
-                        },
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}",
+                        headers={"Content-Type": "application/json"},
                         json={
-                            "model": "llama-3.1-70b-versatile",
-                            "messages": [{"role": "user", "content": prompt_with_url}],
-                            "temperature": 0.5,
-                            "max_tokens": 512
+                            "contents": [
+                                {
+                                    "parts": [
+                                        {"text": prompt_with_data}
+                                    ]
+                                }
+                            ],
+                            "generationConfig": {
+                                "temperature": 0.5,
+                                "maxOutputTokens": 512
+                            }
                         }
                     )
                     
                     if response.status_code == 200:
-                        content = response.json()['choices'][0]['message']['content']
-                        # Kiểm tra nếu content là bảng markdown hợp lệ và liên quan đến AI
+                        content = response.json()['candidates'][0]['content']['parts'][0]['text']
+                        # Kiểm tra nếu content là bảng markdown hợp lệ
                         if content.strip().startswith('|') and '|' in content:
                             lines = content.strip().split('\n')
                             if len(lines) >= 3:  # Header, separator, data
@@ -92,7 +136,7 @@ if uploaded_file:
                                         "Phân loại rank tạp chí": data[3].strip()
                                     })
                     else:
-                        st.warning(f"Lỗi gọi API cho link {url}: {response.status_code}")
+                        error_links.append((url, f"API error: {response.status_code}"))
 
                     # Cập nhật tiến trình
                     progress = (i + 1) / len(links_to_process)
@@ -101,7 +145,7 @@ if uploaded_file:
                     time.sleep(0.5)  # Tránh vượt quá giới hạn rate limit
 
                 except Exception as e:
-                    st.warning(f"Lỗi xử lý link {url}: {str(e)}")
+                    error_links.append((url, str(e)))
 
             if results:
                 # Hiển thị kết quả
@@ -122,6 +166,11 @@ if uploaded_file:
                 )
             else:
                 st.info("Không tìm thấy bài báo nào liên quan đến AI có rank tạp chí.")
+
+            if error_links:
+                st.write("Danh sách link lỗi:")
+                error_df = pd.DataFrame(error_links, columns=["Link", "Lỗi"])
+                st.dataframe(error_df)
 
     except Exception as e:
         st.error(f"Lỗi đọc file Excel: {str(e)}")
